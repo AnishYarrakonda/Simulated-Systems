@@ -44,7 +44,7 @@ tie_cost section.**
 
 ## Done criteria
 
-- `/sim-check` passes: 36 rule checks, hawk/dove coexistence from both directions, NS speed drift,
+- `/sim-check` passes: the rule checks, hawk/dove coexistence from both directions, NS speed drift,
   RPS orbit direction.
 - If you touched rendering, you **looked at a frame** — use the `verify` skill. Tests say nothing
   about whether anything drew.

@@ -142,7 +142,7 @@ class TernaryPlot:
 
     A composition (r, p, s) summing to 1 maps onto a triangle, so the whole state
     of the population is one point. The RPS cycle then shows up directly as an
-    orbit: a closed loop when tie_cost=0, an outward spiral when tie_cost>0.
+    orbit: a closed loop when tie_cost=0, an inward spiral when tie_cost>0.
     """
 
     CORNERS = np.array([[0.5, math.sqrt(3) / 2], [0.0, 0.0], [1.0, 0.0]])  # R, P, S

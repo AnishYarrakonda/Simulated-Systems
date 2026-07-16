@@ -36,7 +36,7 @@ system-wide. `pip install -r requirements.txt`.
 - `rps_sim/` — mango-tree pairing; same trio of files
 - `primer_common/` — shared: `palette` (Primer's colours), `events`, `feed` (play-by-play),
   `arena` (pygame), `graphs` (matplotlib, incl. the ternary plot)
-- `tests/test_rules.py` — 36 rule checks against Primer's source
+- `tests/test_rules.py` — the rule checks against Primer's source
 - Each sim owns a `config.py` dataclass holding every tunable, defaulted to Primer's value.
 
 Each sim has its own `config.py`/`individual.py`/`patch.py`/`simulation.py` and imports them by

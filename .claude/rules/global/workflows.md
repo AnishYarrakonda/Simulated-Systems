@@ -31,7 +31,7 @@ Prints a summary and no windows. This is how you check dynamics.
 ## Test
 
 ```bash
-python3 -m pytest tests/ -q          # 36 rule checks, ~0.1s, from the repo root
+python3 -m pytest tests/ -q          # the rule checks, ~0.1s, from the repo root
 ```
 
 ## The validation gate — `/sim-check`

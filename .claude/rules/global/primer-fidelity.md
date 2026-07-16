@@ -5,16 +5,59 @@ his published source. If you're about to change one, read this first.
 
 ## The authority chain
 
-1. **Primer's source code** — the only authority.
-   - Natural selection + hawk/dove: [`Helpsypoo/primerpython`](https://github.com/Helpsypoo/primerpython)
-     (`blender_scripts/tools/natural_sim.py`, `tools/hawk_dove.py`, `video_scenes/`)
-   - RPS: [`Primer-Learning/RockPaperScissors`](https://github.com/Primer-Learning/RockPaperScissors)
-     (`EvoGameTheorySim.cs`) — the 2024 video, Godot/C#.
+1. **Primer's source code** — the only authority. Three repos, not two:
+   - [`Helpsypoo/primerpython`](https://github.com/Helpsypoo/primerpython) — the Blender era.
+     Rules live in `blender_scripts/tools/`; `video_scenes/` says which ones actually shipped.
+   - [`Primer-Learning/RockPaperScissors`](https://github.com/Primer-Learning/RockPaperScissors)
+     (`EvoGameTheorySim.cs`) — the 2024 video, Godot/C#. `addons/Old sims/SimRunner*.cs` are earlier
+     drafts of the same sim; no new rules.
+   - [`Primer-Learning/PrimerTools`](https://github.com/Primer-Learning/PrimerTools) — the current
+     C#/Godot toolkit, and the **only** source for the 2025 Aging sim
+     (`Simulation/ContinuousSpaceTimeSims/Specific/CreatureSim/`). Actively refactored, so pin a
+     commit near the video's date rather than reading `main`.
 2. **The videos** — useful context, but the code is what shipped. Where the narration and the code
    disagree, the code wins. (Hawk-vs-hawk is *narrated* as risky fighting; the code applies a
    deterministic `FIGHT_COST = 1.0` with no injury roll.)
 3. **Everything else** — blog posts, AI summaries, "evolutionary game theory says…". Treat as
    leads to verify, never as evidence. Several are outright wrong.
+
+### The file map — and which files are not authority
+
+A file existing in `tools/` does **not** mean it shipped. `video_scenes/` is what settles it: if no
+scene imports a tool, it is an abandoned experiment with no dynamic on tape, and it cannot be used to
+justify a rule.
+
+| File | Video | Status |
+|---|---|---|
+| `tools/natural_sim.py` | Natural Selection (2018), **Sacrificing for Family (2021)** | shipped — `video_scenes/natural_selection.py`, `inclusive_fitness.py` |
+| `tools/hawk_dove.py` | Aggression (2019) | shipped — `video_scenes/aggression.py` |
+| `tools/population.py` + `tools/creature.py` + `constants.py` | Logistic Growth (2018) and the replication/mutation segments | shipped — imported by exactly four scenes: `logistic_growth.py`, `replication_only.py`, `mutations.py`, `fecal_transplant.py`. **Not** `why_things_exist.py`, which imports `creature` and `drawn_world` only and never touches the `Population` engine. |
+| `tools/market_sim.py` | Supply and Demand | shipped — `video_scenes/supply_and_demand.py`. Economics: no reproduction, mutation, or fitness. |
+| `EvoGameTheorySim.cs` | Rock/Paper/Scissors (2024) | shipped |
+| `PrimerTools` `CreatureSim/` | Aging (2025) | shipped, but see the caveat below |
+| `tools/hawk_dove_basic.py` | — | **variant**, not imported by `aggression.py`. Fixed population, score-proportional reproduction over 11 buckets, `DEFAULT_NUM_CREATURES = 11000`. Independently confirms `SUCKER_FRACTION = 1/4`. A *mode*, not a sim. |
+| `tools/hamilton_basic.py` | — | **NOT SHIPPED.** See below. |
+| `tools/centipede.py` | — | **NOT SHIPPED.** No scene imports it, no centipede video exists. |
+
+**`hamilton_basic.py` is not the source for "Sacrificing for Family".** It is a standalone
+side-experiment that no scene imports, and two independent research passes have now recommended it
+anyway — which is exactly why this row exists. The shipped altruism sim is **`natural_sim.py`**:
+`video_scenes/inclusive_fitness.py` imports `natural_sim` and its `hamilton()` scene plots
+`graph_type = 'kin_altruist'`, a trait defined in `natural_sim.py` alongside `HELP_REP_BOOST = 0.5`,
+`FAMILY_JUMPS = 3` and `SAMARITAN_RATIO = 1.1`.
+
+The consequence is structural, not cosmetic: the real sim is **spatial**. Altruism is a blob with two
+food taking a detour to hand one to a starving relative, paying with its own certainty of
+reproduction. It is not the abstract mating-chance transfer `hamilton_basic.py` models. Build the
+spatial version — see @docs/plans/sacrifice_sim.md.
+
+**`PrimerTools@main` cannot reproduce the Aging video.** The mechanism (`Genetics.cs`) is complete and
+authoritative, but the seeding is not: `InitialPopulationGeneration` adds no `DeleteriousTrait`s,
+`MaxAge` is commented out, `DeleteriousMutationRate` defaults to `0`, and both default traits are
+built with `MutationIncrement: 0` — so nothing mutates and nothing ages. `AgingSimVideoSequence.cs` is
+mostly commented out. Recover the video's parameters from git history near 2025-02-01; if that fails,
+any value you pick is **ours, not Primer's**, and must be labelled that way rather than defaulted
+silently. See @docs/plans/aging_sim.md.
 
 ## The tie_cost sign — do not "fix" this
 

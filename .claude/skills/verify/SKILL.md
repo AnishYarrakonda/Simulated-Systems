@@ -17,7 +17,7 @@ offscreen driver below — it runs the *real* `run()` loop and captures what it 
 
 ```bash
 cd /Users/anish_1_2_3/Documents/simulations
-python3 -m pytest tests/ -q          # 36 rule checks vs Primer's source
+python3 -m pytest tests/ -q          # the rule checks vs Primer's source
 ```
 
 Each sim has its own `config.py`/`individual.py`/`patch.py`/`simulation.py` and

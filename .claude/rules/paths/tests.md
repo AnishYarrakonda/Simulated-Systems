@@ -6,7 +6,10 @@ alwaysApply: false
 
 # tests/
 
-36 checks pinning our rules against Primer's published source. `pytest`, no fixtures, no mocks.
+Checks pinning our rules against Primer's published source. `pytest`, no fixtures, no mocks.
+
+Don't quote the test count here or anywhere else — it goes stale the moment a sim is added, and a
+stale count reads as "someone deleted tests". `pytest tests/ -q` prints the real number.
 
 ## What belongs here
 

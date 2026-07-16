@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The validation gate: rule checks + the statistical dynamics checks.
 #
-# The unit tests alone are NOT the gate. A wrong port passes all 36 of them and
+# The unit tests alone are NOT the gate. A wrong port passes every one of them and
 # still produces the wrong emergent dynamic -- the ESS, the orbit direction and
 # the trait drift are what actually catch it. That's why this exists separately.
 #
