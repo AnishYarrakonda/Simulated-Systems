@@ -1,0 +1,2 @@
+# Untracked files to copy into a fresh git worktree so it's immediately usable.
+.claude/settings.local.json
