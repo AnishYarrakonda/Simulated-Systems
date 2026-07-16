@@ -1,74 +1,70 @@
-from individual import Individual
+"""A bush. Holds FOOD_VALUE (2) units -- enough for two blobs to share."""
 
-class Patch():
-    # Stores the interactions between individuals at a patch for all scenarios
-    ratios = {"DoveDove": [1, 1],
-              "HawkHawk": [0, 0],
-              "DoveHawk": [0.5, 1.5],
-              "HawkDove": [1.5, 0.5],
-              "Dove": [2, 0],
-              "Hawk": [2, 0]}
 
-    # Creates a new patch
-    def __init__(self):
-        self.food_supply = 0  # stores the food at the location
-        self.individual1 = None  # stores the first individual (if any)
-        self.individual2 = None  # stores the second individual (if any)
+class Patch:
+    """Resolves one contest. Capacity is exactly 2.
 
-    # resets food supply each round.
-    def reset(self):
-        self.food_supply = 2
+    The payoff table here already matched Primer's before this rewrite; it is
+    kept, just sourced from Config so every value stays tunable.
+    """
 
-    # decides how to split food between 0, 1, or 2 individuals
-    def encounter(self, individuals):
-        # raise error for more than 2 individuals
-        if len(individuals) > 2:
-            raise ValueError("encounter() expects a list of 0 to 2 individuals")
-
-        # 0 individuals
-        if len(individuals) == 0:
-            self.individual1 = None
-            self.individual2 = None
-            return
-
-        # 1 individual
-        if len(individuals) == 1:
-            self.individual1 = individuals[0]
-            self.individual2 = None
-
-            strategy = self.individual1.strategy
-            ratio = Patch.ratios[strategy]
-
-            self.individual1.add_food(ratio[0])
-            return
-
-        # 2 individuals
-        self.individual1 = individuals[0]
-        self.individual2 = individuals[1]
-
-        strategy1 = self.individual1.strategy
-        strategy2 = self.individual2.strategy
-
-        encounterKey = strategy1 + strategy2
-        ratio = Patch.ratios[encounterKey]
-
-        self.individual1.add_food(ratio[0])
-        self.individual2.add_food(ratio[1])
-
-    # Function to clear the doves and Hawks
-    def clear_individuals(self):
+    def __init__(self, config, index=0):
+        self.config = config
+        self.index = index
         self.individual1 = None
         self.individual2 = None
 
-    # Returns whether the patch has two individuals in it
+    def clear(self):
+        self.individual1 = None
+        self.individual2 = None
+
     def is_full(self):
         return self.individual1 is not None and self.individual2 is not None
 
-    # Patch object as a string
-    def __str__(self):
-        ind1 = str(self.individual1) if self.individual1 else "N/A"
-        ind2 = str(self.individual2) if self.individual2 else "N/A"
-        return f"Patch: Food = {self.food_supply}, Individual 1 = {ind1}, Individual 2 = {ind2}"
+    def is_empty(self):
+        return self.individual1 is None
 
-    def __repr__(self):
-        return self.__str__()
+    def add(self, individual):
+        if self.individual1 is None:
+            self.individual1 = individual
+        elif self.individual2 is None:
+            self.individual2 = individual
+        else:
+            raise ValueError("Too many blobs on the dance floor")
+
+    def resolve(self):
+        """Award food. Returns (kind, score1, score2); score2 is None if alone."""
+        payoffs = self.config.payoffs()
+
+        if self.individual1 is None:
+            return (None, None, None)
+
+        if self.individual2 is None:
+            score = payoffs["alone"][0]
+            self.individual1.add_food(score)
+            return ("alone", score, None)
+
+        fight1 = self.individual1.plays_fight()
+        fight2 = self.individual2.plays_fight()
+
+        if fight1 and fight2:
+            kind = "fight_fight"
+            s1, s2 = payoffs["fight_fight"]
+        elif fight1:
+            kind = "fight_share"
+            s1, s2 = payoffs["fight_share"]
+        elif fight2:
+            kind = "fight_share"
+            s2, s1 = payoffs["fight_share"]
+        else:
+            kind = "share_share"
+            s1, s2 = payoffs["share_share"]
+
+        self.individual1.add_food(s1)
+        self.individual2.add_food(s2)
+        return (kind, s1, s2)
+
+    def __str__(self):
+        return f"Patch {self.index}: {self.individual1}, {self.individual2}"
+
+    __repr__ = __str__

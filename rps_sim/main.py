@@ -1,139 +1,163 @@
-# imports
-from individual import Individual
-from patch import Patch
+"""Rock/Paper/Scissors, after Primer's "Simulating the Evolution of Rock, Paper, Scissors".
+
+Two windows: a pygame arena (blobs walk to mango trees, pair up, play) with the
+play-by-play underneath, and a matplotlib window with the bar chart and the
+ternary plot -- the ternary plot being the centrepiece of the video.
+
+    python3 main.py                      # tie_cost = 0.5 -> spirals inward, stable
+    python3 main.py --tie-cost 0         # neutral orbit, drifts to fixation
+    python3 main.py --tie-cost -0.5      # spirals outward
+    python3 main.py --num-alleles 3      # mixed strategies
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from primer_common import graphs, palette
+from primer_common.arena import PHASES, Arena, Walker, ring_positions
+
+from config import NAMES, Config
 from simulation import Simulation
-import matplotlib.pyplot as plt
 
-# main functions
-# parameters are self-explanatory
-def main(patches=100, days=100, starting_counts=None, true_mutation_chance=0,
-         winner_result=2, loser_result=0, tie_result=1):
-    # Stores the interactions between individuals at a patch for all scenarios
-    Patch.ratios = {"alone": 2,
-              "rs": [winner_result, loser_result],
-              "pr": [winner_result, loser_result],
-              "sp": [winner_result, loser_result],
-              "rp": [loser_result, winner_result],
-              "sr": [loser_result, winner_result],
-              "ps": [loser_result, winner_result],
-              "rr": [tie_result, tie_result],
-              "pp": [tie_result, tie_result],
-              "ss": [tie_result, tie_result]}
+# The arena gets unreadable and slow past a few hundred blobs; Primer animates a
+# subset too (AnimateBlobs = false for his 2000-day run).
+MAX_DRAWN = 120
 
-    # initialize sim object
-    sim = Simulation(patches)
 
-    # set the max_population and mutation_chance to get simulation started
-    max_population = patches * 2
-    Individual.mutation_chance = true_mutation_chance
+def build_graphs():
+    fig = graphs.new_figure("Rock / Paper / Scissors — graphs", figsize=(12, 6))
+    gs = fig.add_gridspec(1, 2, wspace=0.25)
+    bars = graphs.BarChart(
+        fig.add_subplot(gs[0]),
+        categories=NAMES,
+        colors=palette.STRATEGY_COLORS,
+        title="Allele share",
+        ylabel="%",
+    )
+    ternary = graphs.TernaryPlot(fig.add_subplot(gs[1]), title="Population on the simplex")
+    return fig, bars, ternary
 
-    # check if total starting population is valid
-    total_start = sum(starting_counts.values())
-    if total_start > max_population:
-        print("\nInvalid starting population: greater than max population\n")
-        return
-    
-    # default starting_counts values are 1/10 the number of patches per strategy type
-    if starting_counts is None:
-        starting_counts = {
-        "RRR": patches*0.1,
-        "PPP": patches*0.1,
-        "SSS": patches*0.1,
-        "RPS": patches*0.1,
-        "RRP": patches*0.1,
-        "RRS": patches*0.1,
-        "PPR": patches*0.1,
-        "PPS": patches*0.1,
-        "SSR": patches*0.1,
-        "SSP": patches*0.1,
-        }
 
-    # add individuals according to the starting counts
-    for strat_str, count in starting_counts.items():
-        sim.add_individuals_by_name(strat_str, count)
+def update_graphs(sim, bars, ternary):
+    r, p, s = sim.allele_fractions()
+    bars.update({"Rock": r * 100, "Paper": p * 100, "Scissors": s * 100})
+    ternary.update(r, p, s)
+    graphs.draw()
 
-    print("Simulation running...\nPlease be patient for large numbers\nMay take longer than expected.")
 
-    # get the two plots ready
-    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+def build_walkers(contests, trees, homes):
+    walkers = {}
+    for tree in contests:
+        spot = trees[tree.index % len(trees)]
+        for slot, ind in enumerate((tree.individual1, tree.individual2)):
+            if ind is None:
+                continue
+            offset = 8 if slot == 0 else -8
+            walkers[ind.id] = Walker(
+                homes[len(walkers) % len(homes)], (spot[0] + offset, spot[1])
+            )
+    return walkers
 
-    # Set titles and labels
-    axs[0].set_title("Strategy populations over time")
-    axs[0].set_xlabel("Day")
-    axs[0].set_ylabel("Number of Individuals")
-    
-    axs[1].set_title("Total Population over time")
-    axs[1].set_xlabel("Day")
-    axs[1].set_ylabel("Number of Individuals")
-    axs[1].set_ylim(0, max_population)
 
-    # Initialize lines
-    strat_lines = {}
-    for strat_tuple in sim.strategies:
-        strat_name = sim.strategy_map.get(strat_tuple, str(strat_tuple))
-        line, = axs[0].plot([], [], label=strat_name)
-        strat_lines[strat_tuple] = line
-        
-    axs[0].legend(loc="upper right")
-        
-    line_total, = axs[1].plot([], [], color='black', label="Total Population")
-    axs[1].legend()
+def draw(arena, drawn, trees, walkers, phase, t):
+    for spot in trees:
+        arena.draw_food(spot, radius=4)
+    for ind in drawn:
+        walker = walkers.get(ind.id)
+        if walker is None:
+            continue
+        squash = 1.0 if walker.eating(phase, t) else 0.0
+        arena.draw_blob(walker.position(phase, t), color=ind.color, squash=squash)
 
-    # simulates the entire time range
-    for day in range(1, days + 1):
-        # one day of simulation
-        sim.simulate_day()
 
-        # Update all strategy populations using strategy names
-        for strat_tuple, log in sim.strategy_logs.items():
-            days_list = sorted(log.keys())
-            counts_list = [log[d] for d in days_list]
-            strat_lines[strat_tuple].set_data(days_list, counts_list)
+def run(config):
+    sim = Simulation(config)
 
-        # Total population plot
-        if sim.individuals_on_day:
-            days_list = sorted(sim.individuals_on_day.keys())
-            counts_list = [sim.individuals_on_day[d] for d in days_list]
-            line_total.set_data(days_list, counts_list)
+    if not config.render:
+        sim.run_headless()
+        return sim
 
-        axs[0].set_xlim(1, max(10, day))
-        # update y_lim for upper plot dynamically
-        max_y = 0
-        for log in sim.strategy_logs.values():
-            if log:
-                max_y = max(max_y, max(log.values()))
-        axs[0].set_ylim(0, max_y + 10)
-        axs[1].set_xlim(1, max(10, day))
+    arena = Arena("Rock / Paper / Scissors — arena", world_extent=150)
+    _, bars, ternary = build_graphs()
 
-        # pause between frames for 1 millisecond or whatever the computers max fps is for the animation
-        plt.pause(0.001)
+    tree_spots = ring_positions(min(config.num_trees, 80), radius=95, jitter=20, rng=sim.rng)
 
-    # Print average population per strategy
-    print("\nAverage population per strategy:")
-    sim.print_population_average()
+    for _ in range(config.num_days):
+        if not arena.running or not sim.individuals:
+            break
 
-    # keeps matplotlib window open
-    plt.show()
+        # Snapshot the parents before reproduction replaces them -- these are the
+        # blobs that actually played today, so they're the ones worth drawing.
+        parents = list(sim.individuals)
+        contests = sim.simulate_day()
+
+        drawn = parents[:MAX_DRAWN]
+        drawn_ids = {ind.id for ind in drawn}
+        shown = [t for t in contests if
+                 (t.individual1 and t.individual1.id in drawn_ids)
+                 or (t.individual2 and t.individual2.id in drawn_ids)]
+        homes = ring_positions(max(1, len(drawn)), radius=140)
+        walkers = build_walkers(shown[: len(tree_spots)], tree_spots, homes)
+
+        update_graphs(sim, bars, ternary)
+
+        r, p, s = sim.allele_fractions()
+        hud = f"Day {sim.day}  pop {len(sim.individuals)}  R {r:.0%} P {p:.0%} S {s:.0%}"
+        for phase, duration in PHASES:
+            elapsed = 0.0
+            while elapsed < duration and arena.running:
+                if not arena.pump():
+                    break
+                arena.begin_frame()
+                draw(arena, drawn, tree_spots, walkers, phase, min(1.0, elapsed / duration))
+                dt = arena.end_frame(sim.log, hud=hud)
+                if not arena.paused:
+                    elapsed += dt * arena.speed
+
+    arena.quit()
+    graphs.show()
+    return sim
+
+
+def parse_args():
+    d = Config()
+    p = argparse.ArgumentParser(description="Primer-style rock/paper/scissors simulation")
+    p.add_argument("--num-days", type=int, default=d.num_days)
+    p.add_argument("--blobs", type=int, default=d.initial_blob_count)
+    p.add_argument("--trees", type=int, default=d.num_trees)
+    p.add_argument("--mutation-rate", type=float, default=d.mutation_rate)
+    p.add_argument("--num-alleles", type=int, default=d.num_alleles_per_blob)
+    p.add_argument("--win-magnitude", type=float, default=d.win_magnitude)
+    p.add_argument(
+        "--tie-cost", type=float, default=d.tie_cost,
+        help="0.5 = spirals inward, stable (Primer's default); "
+             "0 = neutral orbit; negative = spirals outward",
+    )
+    p.add_argument("--seed", type=int, default=d.seed)
+    p.add_argument("--no-render", action="store_true")
+    a = p.parse_args()
+    return Config(
+        num_days=a.num_days,
+        initial_blob_count=a.blobs,
+        num_trees=a.trees,
+        mutation_rate=a.mutation_rate,
+        num_alleles_per_blob=a.num_alleles,
+        win_magnitude=a.win_magnitude,
+        tie_cost=a.tie_cost,
+        seed=a.seed,
+        render=not a.no_render,
+    )
+
 
 if __name__ == "__main__":
-    # all strategies
-    all_strategies = [
-        "RRR", "PPP", "SSS",    # Only one move
-        "RPS",                  # Random
-        "RRP", "RRS",           # Heavy Rock
-        "PPR", "PPS",           # Heavy Paper
-        "SSR", "SSP"            # Heavy Scissors
-    ]
-
-    # counts for each strategy
-    population_counts = [100 for _ in all_strategies]
-
-    # starting population dictionary for all 10 strategies
-    true_starting_counts = {all_strategies[i]: population_counts[i] for i in range(10)}
-
-    # running the main method
-    main(patches=1000,
-         days=1000, 
-         starting_counts=true_starting_counts,
-         true_mutation_chance=0.01,
-         winner_result=1.8, loser_result=0.2, tie_result=1)
+    cfg = parse_args()
+    sim = run(cfg)
+    if sim.individuals_on_day:
+        last = max(sim.individuals_on_day)
+        r, p, s = sim.allele_fractions()
+        print(f"\nDay {last}: population {sim.individuals_on_day[last]}")
+        print(f"Rock {r:.1%}  Paper {p:.1%}  Scissors {s:.1%}")
+        print("Interior equilibrium is 1/3 each.")

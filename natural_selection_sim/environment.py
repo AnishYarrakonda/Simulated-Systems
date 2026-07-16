@@ -1,159 +1,256 @@
-from creature import Creature
-from tile import Tile
-import numpy as np
+"""Headless natural selection sim, ported from Primer's natural_sim.py."""
+
+import math
 import random
 
+from primer_common.events import Born, DaySummary, Died, EventLog, Predation
+
+from creature import Creature
+
+
+class Food:
+    __slots__ = ("x", "y", "eaten")
+
+    def __init__(self, x, y):
+        self.x, self.y, self.eaten = x, y, False
+
+
 class Environment:
-    # initializes an environment
-    def __init__(self,
-                 edge_length=50,                    # gurt is a square edge_length by edge_length
-                 food_spawn_rate=0.2,   
-                 creature_total=None,
-                 average_size = 5,
-                 average_speed = 5,
-                 average_vision = 4,
-                 average_trait_variability = 1,
-                 ticks_per_day = 20
-                 ):
+    def __init__(self, config):
+        self.config = config
+        self.rng = random.Random(config.seed)
+        self.day = 0
+        self.log = EventLog()
 
-        if creature_total is None:
-            creature_total = int(edge_length**2 / 10)  # 1/10 of the total area
-
-        self.edge_length = edge_length
-        self.food_spawn_rate = food_spawn_rate
-        self.average_size = average_size
-        self.average_speed = average_speed
-        self.average_vision = average_vision
-        self.average_trait_variability = average_trait_variability
-        
-        self.ticks_per_day = ticks_per_day
-        self.day = 1
-        self.day_to_averages = {"size": {}, "speed": {}, "vision": {}}
+        Creature.reset_ids()
+        self.creatures = [
+            Creature(config, size=config.start_size, speed=config.start_speed,
+                     sense=config.start_sense, rng=self.rng)
+            for _ in range(config.creature_count())
+        ]
+        self.food = []
         self.day_to_population = {}
+        self.day_to_averages = {"size": {}, "speed": {}, "sense": {}}
+        self._first_day = True
 
-        # gurt is initialized with None as placeholders
-        self.gurt = [[Tile(X_coord=x, Y_coord=y) for x in range(edge_length)] for y in range(edge_length)]
+    # -- setup -------------------------------------------------------------
+    def food_count_today(self):
+        cfg = self.config
+        if cfg.famine_day is not None and self.day >= cfg.famine_day:
+            return cfg.famine_food_count
+        return cfg.food_count
 
-        # list of all creature objects
-        self.creatures = []
-
-        # loop to create the creature objects and store in the list
-        sizes = np.clip(np.random.randn(creature_total) * average_trait_variability + average_size, 1, 8)
-        speeds = np.clip(np.random.randn(creature_total) * average_trait_variability + average_speed, 1, 8)
-        visions = np.clip(np.random.randn(creature_total) * average_trait_variability + average_vision, 1, 8)
-        
-        # loops to initialize creatures with the corresponding trait values and then append eacho ne to the list of creatures
-        for i in range(creature_total):
-            self.creatures.append(Creature(size=sizes[i], speed=speeds[i], vision=visions[i]))
-
-    # resets all tiles and individuals at the end of a day (after reproduction)
-    def reset(self):
-        for row in self.gurt:
-            for tile in row:
-                tile.clear_creatures()
-                tile.food = False
-        for creature in self.creatures:
-            creature.reset()
-
-    # spawns food (for beginning of day)
     def spawn_food(self):
-        for row in self.gurt:
-            for tile in row:
-                if random.random() < self.food_spawn_rate:
-                    tile.food = True
-    
-    # moves a creature internally and externally to its new tile
-    def move_creature(self, creature: Creature, tile: Tile):
-        if tile is None:
-            print("cannot move: missing tile argument")
-            return
-        
-        if creature.x is not None and creature.y is not None:
-            starting_tile = self.gurt[creature.y][creature.x]
-            starting_tile.remove_creature(creature)
+        """Uniform over the whole world -- Primer never restricted it to the middle."""
+        e = self.config.world_extent
+        self.food = [
+            Food(self.rng.uniform(-e, e), self.rng.uniform(-e, e))
+            for _ in range(self.food_count_today())
+        ]
 
-        creature.x = tile.X_coord
-        creature.y = tile.Y_coord
-        tile.add_creature(creature)
-        creature.visited_tiles.append(tile)
-
-    # places very creature on a tile (for starting the day)
-    def place_creatures_on_tiles(self):
-        for creature in self.creatures:
-            tile = self.gurt[random.randint(0, self.edge_length-1)][random.randint(0, self.edge_length-1)]
-            self.move_creature(creature, tile)
-
-    # distributes food to all contest winners
-    def handle_contests(self):
-        active_tiles = set()
-        for creature in self.creatures:
-            if creature.x is not None and creature.y is not None:
-                active_tiles.add(self.gurt[creature.y][creature.x])
-
-        for tile in active_tiles:
-            if tile.food and tile.is_occupied():
-                winner = tile.contest()
-                tile.creature_consumed_food(winner)
-
-    # one singluar tick of simulation
-    def simulate_tick(self):
-        for creature in self.creatures:
-            if creature.should_rest():
-                creature.resting = True
+    def place_creatures(self):
+        for c in self.creatures:
+            if self._first_day:
+                c.place_on_wall(self.rng)
+                c.start_day()
             else:
-                creature.resting = False
-                tile = creature.choose_location(self)
-                self.move_creature(creature, tile)
+                c.start_day(reverse_heading=True)
+        self._first_day = False
 
-        self.handle_contests()
+    def day_length(self):
+        """The day lasts as long as the most efficient creature can keep going."""
+        if not self.creatures:
+            return self.config.default_day_length
+        return max(
+            math.ceil(self.config.starting_energy / c.energy_cost)
+            for c in self.creatures
+            if c.energy_cost > 0
+        )
 
-        for creature in self.creatures:
-            creature.update_creature()
+    # -- per-step ----------------------------------------------------------
+    def _nearest_food(self, c):
+        best, best_d = None, c.sense_radius
+        for f in self.food:
+            if f.eaten:
+                continue
+            d = math.hypot(f.x - c.x, f.y - c.y)
+            if d < best_d:
+                best, best_d = f, d
+        return best, best_d
 
-    # one full day of simulation
-    def simulate_day(self):
-        # spawns food and puts each creature on a tile
-        self.spawn_food()
-        self.place_creatures_on_tiles()
+    def _predator_near(self, c):
+        """A creature 1.2x your size or bigger, close enough to see, not yet home."""
+        ratio = self.config.predator_size_ratio
+        best, best_d = None, c.sense_radius
+        for other in self.creatures:
+            if other is c or not other.alive or other.home:
+                continue
+            if other.size >= c.size * ratio:
+                d = math.hypot(other.x - c.x, other.y - c.y)
+                if d < best_d:
+                    best, best_d = other, d
+        return best
 
-        # lets the ticks run
-        for tick in range(self.ticks_per_day):
-            self.simulate_tick()
-        
-        # store data from the day
-        avg_size, avg_speed, avg_vision = self.average_trait_values()
-        self.day_to_averages["size"][self.day] = avg_size
-        self.day_to_averages["speed"][self.day] = avg_speed
-        self.day_to_averages["vision"][self.day] = avg_vision
-        self.day_to_population[self.day] = len(self.creatures)
+    def _nearest_prey(self, c):
+        ratio = self.config.predator_size_ratio
+        best, best_d = None, c.sense_radius
+        for other in self.creatures:
+            if other is c or not other.alive or other.home:
+                continue
+            # Immune once home -- that's the whole point of getting back.
+            if other.size * ratio <= c.size:
+                d = math.hypot(other.x - c.x, other.y - c.y)
+                if d < best_d:
+                    best, best_d = other, d
+        return best, best_d
 
-        # handles death and reproduction fairly by shuffling randomly
-        random.shuffle(self.creatures)
+    def step(self):
+        cfg = self.config
+        for c in self.creatures:
+            if not c.alive or c.home:
+                continue
 
-        #survival and reproduciton
-        survivor_list = []
-        offspring_list = []
+            if c.energy <= 0:
+                c.alive = False
+                c.dead_today = True
+                self.log.emit(Died(who=c.name, cause="ran out of energy"))
+                continue
 
-        for creature in self.creatures:
-            creature.survive_and_set_offspring()
-            if creature.survives:
-                survivor_list.append(creature)
-                offspring = creature.reproduce_offspring()
-                offspring_list.extend(offspring)
+            predator = self._predator_near(c)
+            c.choose_state(predator is not None)
 
-        # update population
-        self.creatures = survivor_list + offspring_list
-        
-        # reset at the end of day
-        self.reset()
+            if c.state == "fleeing":
+                # Straight away from the predator: angle_to_predator + pi.
+                c.heading_target = math.atan2(c.y - predator.y, c.x - predator.x)
+            elif c.state == "homebound":
+                c.aim_home()
+            else:
+                target = None
+                if c.can_eat():
+                    food, food_d = self._nearest_food(c)
+                    prey, prey_d = self._nearest_prey(c)
+                    if food and (not prey or food_d <= prey_d):
+                        target = (food.x, food.y)
+                    elif prey:
+                        target = (prey.x, prey.y)
+                if target:
+                    c.heading_target = math.atan2(target[1] - c.y, target[0] - c.x)
+                else:
+                    c.wander()
 
-        # increment day number
+            c.turn()
+            c.advance()
+            c.energy -= c.energy_cost
+
+            if c.can_eat() and not c.home:
+                self._try_eat(c)
+
+    def _try_eat(self, c):
+        cfg = self.config
+        for f in self.food:
+            if f.eaten:
+                continue
+            if math.hypot(f.x - c.x, f.y - c.y) < cfg.eat_distance:
+                f.eaten = True
+                c.eaten.append(f)
+                if not c.can_eat():
+                    return
+
+        if not c.can_eat():
+            return
+
+        prey, d = self._nearest_prey(c)
+        if prey and d < cfg.eat_distance:
+            prey.alive = False
+            prey.dead_today = True
+            self.log.emit(
+                Predation(predator=c.name, prey=prey.name,
+                          predator_size=c.size, prey_size=prey.size)
+            )
+            # The prey's stomach transfers, and the prey itself counts as one food.
+            for nom in prey.eaten:
+                if c.can_eat():
+                    c.eaten.append(nom)
+            if c.can_eat():
+                c.eaten.append(prey)
+
+    # -- day ---------------------------------------------------------------
+    def begin_day(self):
         self.day += 1
+        self.log.start_day()
+        self.spawn_food()
+        self.place_creatures()
+        return self.day_length()
 
-    # returns a list with the average for each trait currently
-    def average_trait_values(self):
-        total = len(self.creatures)
-        avg_size = np.mean([c.size for c in self.creatures]) if total > 0 else 0
-        avg_speed = np.mean([c.speed for c in self.creatures]) if total > 0 else 0
-        avg_vision = np.mean([c.vision for c in self.creatures]) if total > 0 else 0
-        return (avg_size, avg_speed, avg_vision)
+    def everyone_done(self):
+        return all((not c.alive) or c.home for c in self.creatures)
+
+    def finish_day(self):
+        """Survival, reproduction and logging.
+
+        Shared by the headless loop and the rendered one -- the renderer used to
+        carry its own copy, which silently dropped the birth/death events.
+        """
+        survivors, offspring, deaths = [], [], 0
+        for c in self.creatures:
+            if not c.alive:
+                deaths += 1
+                continue
+            n = len(c.eaten)
+            if n == 0 or not c.home:
+                c.alive = False
+                deaths += 1
+                self.log.emit(Died(who=c.name, cause="never made it home"
+                                   if n else "found no food"))
+                continue
+            survivors.append(c)
+            if n >= 2:
+                baby = c.make_offspring()
+                offspring.append(baby)
+                self.log.emit(Born(who=baby.name, parent=c.name))
+
+        self.creatures = survivors + offspring
+        self._record(len(offspring), deaths)
+        return self.creatures
+
+    def simulate_day(self):
+        total_steps = self.begin_day()
+        for _ in range(total_steps):
+            if self.everyone_done():
+                break
+            self.step()
+        return self.finish_day()
+
+    def _record(self, births, deaths):
+        n = len(self.creatures)
+        self.day_to_population[self.day] = n
+        avgs = self.average_traits()
+        for k, v in avgs.items():
+            self.day_to_averages[k][self.day] = v
+        self.log.emit(
+            DaySummary(day=self.day, population=n, births=births, deaths=deaths,
+                       stats={f"avg {k}": v for k, v in avgs.items()})
+        )
+
+    def average_traits(self):
+        n = len(self.creatures)
+        if not n:
+            return {"size": 0.0, "speed": 0.0, "sense": 0.0}
+        return {
+            "size": sum(c.size for c in self.creatures) / n,
+            "speed": sum(c.speed for c in self.creatures) / n,
+            "sense": sum(c.sense for c in self.creatures) / n,
+        }
+
+    def speed_histogram(self):
+        counts = {}
+        for c in self.creatures:
+            counts[round(c.speed, 1)] = counts.get(round(c.speed, 1), 0) + 1
+        return counts
+
+    def run_headless(self):
+        for _ in range(self.config.days):
+            if not self.creatures:
+                break
+            self.simulate_day()
+        return self

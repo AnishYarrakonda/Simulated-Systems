@@ -1,66 +1,48 @@
-from individual import Individual
+"""A mango tree. Feeds one blob alone, or hosts a game between two."""
 
-class Patch():
-    # Creates a new patch
-    def __init__(self):
-        self.food_supply = 0        # stores the food at the location
-        self.individual1 = None     # stores the first individual (if any)
-        self.individual2 = None     # stores the second individual (if any)
-        
-    #resets food supply each round.
-    def reset(self):
-        self.food_supply = 2
+from config import NAMES
 
-    # decides how to split food between 0, 1, or 2 individuals
-    def encounter(self, individuals):
-        # raise error for more than 2 individuals
-        if len(individuals) > 2:
-            raise ValueError("encounter() expects a list of 0 to 2 individuals")
 
-        # 0 individuals
-        if len(individuals) == 0:
-            self.individual1 = None
-            self.individual2 = None
-            return
-
-        # 1 individual
-        if len(individuals) == 1:
-            self.individual1 = individuals[0]
-            self.individual2 = None
-
-            strategy = "alone"
-            ratio = Patch.ratios[strategy]
-
-            self.individual1.add_food(ratio)
-            return
-
-        # 2 individuals
-        self.individual1 = individuals[0]
-        self.individual2 = individuals[1]
-
-        move1 = self.individual1.playMove()
-        move2 = self.individual2.playMove()
-
-        encounterKey = move1 + move2
-        ratio = Patch.ratios[encounterKey]
-
-        self.individual1.add_food(ratio[0])
-        self.individual2.add_food(ratio[1])
-
-    # Function to clear the patch of individuals
-    def clear_individuals(self):
+class Patch:
+    def __init__(self, config, index=0):
+        self.config = config
+        self.index = index
         self.individual1 = None
         self.individual2 = None
-    
-    # Returns whether or not the patch has two individuals in it
-    def is_full(self):
-        return self.individual1 != None and self.individual2 != None
-    
-    # Patch object as a string
+
+    def clear(self):
+        self.individual1 = None
+        self.individual2 = None
+
+    def add(self, individual):
+        if self.individual1 is None:
+            self.individual1 = individual
+        elif self.individual2 is None:
+            self.individual2 = individual
+        else:
+            raise ValueError("A tree holds at most two blobs")
+
+    def resolve(self):
+        """Award rewards. Returns (kind, moves, r1, r2)."""
+        if self.individual1 is None:
+            return (None, None, None, None)
+
+        if self.individual2 is None:
+            # Eating alone always pays 2 -> exactly two offspring.
+            reward = 1 + self.config.win_magnitude
+            self.individual1.reward = reward
+            return ("alone", None, reward, None)
+
+        m1 = self.individual1.play()
+        m2 = self.individual2.play()
+        matrix = self.config.reward_matrix()
+        r1, r2 = matrix[m1][m2], matrix[m2][m1]
+
+        self.individual1.reward = r1
+        self.individual2.reward = r2
+        return ("game", (NAMES[m1], NAMES[m2]), r1, r2)
+
     def __str__(self):
-        ind1 = str(self.individual1) if self.individual1 else "N/A"
-        ind2 = str(self.individual2) if self.individual2 else "N/A"
-        return f"Patch: Food = {self.food_supply}, Individual 1 = {ind1}, Individual 2 = {ind2}"
-    
-    def __repr__(self):
-        return self.__str__()
+        return f"Tree {self.index}: {self.individual1}, {self.individual2}"
+
+    __repr__ = __str__

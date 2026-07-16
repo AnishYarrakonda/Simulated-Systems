@@ -1,159 +1,160 @@
+"""Headless rock/paper/scissors sim, ported from Primer's EvoGameTheorySim.cs."""
+
+import random
+
+from primer_common.events import Ate, DaySummary, Encounter, EventLog
+
+from config import NAMES
 from individual import Individual
 from patch import Patch
-import random
-from collections import Counter
 
-class Simulation():
-    
-    # initializes the sim with the correct number of patches
-    def __init__(self, number_of_patches):
-        self.day = 1
-        self.number_of_patches = number_of_patches
-        self.max_population = number_of_patches * 2
-        self.all_individuals = []
-        self.environment = [Patch() for _ in range(number_of_patches)]
 
-        self.strategy_names = [
-            "RRR", "PPP", "SSS",
-            "RPS", "RRP", "RRS",
-            "PPR", "PPS", "SSR",
-            "SSP"
-        ]
+class Simulation:
+    def __init__(self, config):
+        self.config = config
+        self.rng = random.Random(config.seed)
+        self.day = 0
+        self.log = EventLog()
 
-        # map the strategy tuples to names
-        self.strategy_map = {
-            Individual.strategy_types[i]: self.strategy_names[i]
-            for i in range(len(self.strategy_names))
-        }
+        Individual.reset_ids()
+        self.individuals = self._seed_population()
+        self.trees = [Patch(config, i) for i in range(config.num_trees)]
 
-        # initialize strategy count and population history dictionaries in one place
-        self.strategies = Individual.strategy_types
-
-        # strategy counts initialized to zero
-        self.strategy_counts = {s: 0 for s in self.strategies}
-
-        # population history per strategy
-        self.strategy_logs = {s: {} for s in self.strategies}
-
+        self.strategy_logs = {name: {} for name in NAMES}
         self.individuals_on_day = {}
+        self.last_contests = []
 
-        # reset the sim for day 1
-        self.reset()
+    def _seed_population(self):
+        cfg = self.config
+        freqs = cfg.initial_allele_frequencies or (1, 1, 1)
+        total = sum(freqs)
+        weights = [f / total for f in freqs]
 
-    # converts the strategy string like "RRS" to the tuple like (2/3, 0, 1/3)
-    def str_to_strategy(self, s):
-        s = s.lower()
-        counts = [s.count("r"), s.count("p"), s.count("s")]
-        total = sum(counts)
-        if total == 0:
-            raise ValueError(f"Invalid strategy string '{s}'")
-        return tuple(c / total for c in counts)
+        pop = []
+        for _ in range(cfg.initial_blob_count):
+            strategies = self.rng.choices(
+                range(3), weights=weights, k=cfg.num_alleles_per_blob
+            )
+            pop.append(Individual(strategies, cfg, self.rng))
+        return pop
 
-    # adds an individual to the sim
-    def add_individual_to_sim(self, individual):
-        self.all_individuals.append(individual)
+    # -- counts ------------------------------------------------------------
+    def allele_counts(self):
+        """Total alleles of each type -- the population's point on the simplex."""
+        counts = [0, 0, 0]
+        for ind in self.individuals:
+            for allele in ind.strategies:
+                counts[allele] += 1
+        return counts
 
-    # resets the sim for each new day
-    def reset(self):
-        for individual in self.all_individuals:
-            individual.reset()
-        for patch in self.environment:
-            patch.reset()
+    def allele_fractions(self):
+        counts = self.allele_counts()
+        total = sum(counts) or 1
+        return [c / total for c in counts]
 
-    # updates the counts of each strategy
-    def update_counts(self):
-        # Reset counts
-        for s in self.strategies:
-            self.strategy_counts[s] = 0
+    def genotype_counts(self):
+        """Blobs per lattice point, for the mixed-strategy ternary bars."""
+        counts = {}
+        for ind in self.individuals:
+            counts[ind.genotype] = counts.get(ind.genotype, 0) + 1
+        return counts
 
-        # Count individuals per strategy using Counter for speed
-        strat_list = [ind.strategy for ind in self.all_individuals]
-        counts = Counter(strat_list)
-        for s in self.strategies:
-            self.strategy_counts[s] = counts.get(s, 0)
+    # -- day ---------------------------------------------------------------
+    def assign(self):
+        """Primer's tree allocation.
 
-    # assigns each individual to a patch for the day
-    def assignPatches(self):
-        patch_numbers = [num for _ in range(2) for num in range(self.number_of_patches)]
-        patch_lists = [[] for _ in range(self.number_of_patches)]
+        num_games = clamp(N - T, 0, T) trees host a pair; the blobs left over eat
+        alone (two offspring) if a tree is still free, and starve otherwise. So
+        N <= T means everyone doubles, and N >= 2T starves the surplus.
+        """
+        cfg = self.config
+        for tree in self.trees:
+            tree.clear()
 
-        random.shuffle(patch_numbers)
-        for individual in self.all_individuals:
-            patch_number = patch_numbers.pop()
-            patch_lists[patch_number].append(individual)
+        parents = list(self.individuals)
+        self.rng.shuffle(parents)
 
-        for i in range(self.number_of_patches):
-            self.environment[i].encounter(patch_lists[i])
+        num_games = max(0, len(parents) - cfg.num_trees)
+        num_games = min(num_games, cfg.num_trees)
 
-    # all individuals either survive/die and/or reproduce/don't reproduce at the end of the day
-    # this function loops through each individuals list to quickly apply the changes to each one
-    # random.shuffle ensures no bias toward particular strategies at the front of the list
-    def survive_and_reproduce_all(self):
-        # stores offspring in a list
-        new_individuals = []
-        # shuffles to prevent biased reproduction rates
-        random.shuffle(self.all_individuals)
-        # stores survivors in a list to prevent potential RunTime Errors
-        survivors = []
-        # iterates through every individual
-        for individual in self.all_individuals:
-            # applies method to set their survival and reproduction for the day
-            individual.survive_and_reproduce()
+        contests = []
+        for i in range(num_games):
+            tree = self.trees[i]
+            tree.add(parents[2 * i])
+            tree.add(parents[2 * i + 1])
+            contests.append(tree)
 
-            if individual.survives:
-                survivors.append(individual)
+        starved = []
+        next_tree = num_games
+        for j in range(num_games * 2, len(parents)):
+            if num_games < cfg.num_trees and next_tree < cfg.num_trees:
+                tree = self.trees[next_tree]
+                tree.add(parents[j])
+                contests.append(tree)
+                next_tree += 1
             else:
-                individual.die()
+                parents[j].reward = 0.0
+                starved.append(parents[j])
 
-        self.all_individuals = survivors
+        self.last_contests = contests
+        return contests, starved
 
-        for individual in self.all_individuals:
-            if individual.reproduces:
-                if len(self.all_individuals) + len(new_individuals) < self.max_population:
-                    offspring = individual.reproduce()
-                    new_individuals.append(offspring)
+    def resolve_all(self, contests):
+        for tree in contests:
+            kind, moves, r1, r2 = tree.resolve()
+            if kind == "alone":
+                self.log.emit(Ate(who=tree.individual1.name, score=r1, where=tree.index))
+            elif kind == "game":
+                self.log.emit(
+                    Encounter(
+                        a=f"{tree.individual1.name} ({moves[0]})",
+                        b=f"{tree.individual2.name} ({moves[1]})",
+                        a_score=r1,
+                        b_score=r2,
+                        where=tree.index,
+                    )
+                )
 
-        for offspring in new_individuals:
-            self.add_individual_to_sim(offspring)
+    def reproduce(self):
+        """Generations do not overlap -- the next day is children only."""
+        children = []
+        for ind in self.individuals:
+            for _ in range(ind.offspring_count()):
+                children.append(ind.make_offspring())
+        parents = len(self.individuals)
+        self.individuals = children
+        return len(children), parents
 
-
-    # simulates one day
     def simulate_day(self):
-        self.reset()
-        self.assignPatches()
-        self.survive_and_reproduce_all()
-        self.update_counts()
-
-        for s in self.strategies:
-            self.strategy_logs[s][self.day] = self.strategy_counts[s]
-
-        self.individuals_on_day[self.day] = len(self.all_individuals)
-
         self.day += 1
+        self.log.start_day()
 
-    # adds individuals to the sim by their name like "RRR"
-    def add_individuals_by_name(self, strategy_str, count):
-        strategy_tuple = self.str_to_strategy(strategy_str)
-        if strategy_tuple not in self.strategy_map:
-            raise ValueError(f"Strategy tuple {strategy_tuple} not found in known strategies")
-        for _ in range(count):
-            self.add_individual_to_sim(Individual(strategy_tuple, self))
+        contests, _starved = self.assign()
+        self.resolve_all(contests)
+        births, parents = self.reproduce()
 
-    # prints the averages of all population types
-    def print_population_average(self):
-        print("Average population per strategy:")
-        for strat_tuple, log in self.strategy_logs.items():
-            if log:
-                avg = sum(log.values()) / len(log)
-                name = self.strategy_map.get(strat_tuple, str(strat_tuple))
-                print(f"{name}: {avg:.2f}")
-            else:
-                name = self.strategy_map.get(strat_tuple, str(strat_tuple))
-                print(f"{name}: No data")
+        counts = self.allele_counts()
+        total = sum(counts) or 1
+        for i, name in enumerate(NAMES):
+            self.strategy_logs[name][self.day] = counts[i]
+        self.individuals_on_day[self.day] = len(self.individuals)
 
-        # Overall population average
-        if self.individuals_on_day:
-            overall_avg = sum(self.individuals_on_day.values()) / len(self.individuals_on_day)
-            print(f"Total Population Average: {overall_avg:.2f}")
-        else:
-            print("No population data yet.")
+        self.log.emit(
+            DaySummary(
+                day=self.day,
+                population=len(self.individuals),
+                births=births,
+                deaths=parents,  # every parent is replaced
+                stats={f"{n} %": 100 * counts[i] / total for i, n in enumerate(NAMES)},
+            )
+        )
+        return contests
+
+    def run_headless(self):
+        history = []
+        for _ in range(self.config.num_days):
+            if not self.individuals:
+                break
+            self.simulate_day()
+            history.append(self.allele_fractions())
+        return history

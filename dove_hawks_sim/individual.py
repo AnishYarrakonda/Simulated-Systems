@@ -1,55 +1,76 @@
 import random
 
-class Individual():
-    # creates a new individual with a strategy, food, and age variable
-    def __init__(self, strategy, sim):
-        self.strategy = strategy  # either "Dove" or "Hawk"
-        self.food = 0  # tracks how much food the individual has for the day
-        self.age = 0  # tracks number of days the individual has survived
-        self.survives = False  # whether an individual survives or not on this day
-        self.reproduces = False  # whether an individual reproduces or not on this day
-        self.isAlive = True
-        self.simulation = sim  # whether an individual is alive or not
+from primer_common import palette
 
-    # resets food (and maybe other things later if added) for each new day
+
+class Individual:
+    """A blob with a `fight_chance` in [0, 1] -- its probability of playing hawk.
+
+    Primer stores aggression as a float and rolls it fresh at every contest
+    (`if fight_chance > random(): 'fight'`). In binary mode it only ever holds
+    0 or 1, which is the hawk/dove demo; float mode lets it evolve continuously.
+    """
+
+    _next_id = 1
+
+    def __init__(self, fight_chance, config, rng=None):
+        self.fight_chance = fight_chance
+        self.config = config
+        self.rng = rng or random
+        self.score = 0.0
+        self.age = 0
+        self.id = Individual._next_id
+        Individual._next_id += 1
+
+    @classmethod
+    def reset_ids(cls):
+        cls._next_id = 1
+
+    @property
+    def strategy(self):
+        """Display label. In float mode this is just the likelier of the two."""
+        return "Hawk" if self.fight_chance >= 0.5 else "Dove"
+
+    @property
+    def color(self):
+        return palette.mix_colors(palette.DOVE, palette.HAWK, self.fight_chance)
+
+    @property
+    def name(self):
+        return f"{self.strategy.lower()}#{self.id}"
+
     def reset(self):
-        self.food = 0
-        self.survives = False
-        self.reproduces = False
+        self.score = 0.0
 
-    # determines how an individual survives and reproduces
-    # the food they have from 0-1 is the chance of them surviving
-    # the food they have from 1-2 is the chance of them reproducing
-    def survive_and_reproduce(self):
+    def plays_fight(self):
+        """Rolled per contest, not fixed per lifetime."""
+        return self.fight_chance > self.rng.random()
 
-        random1 = random.random()
-
-        if self.food <= 1:
-            self.survives = random1 < self.food
-        else:
-            self.survives = True
-            self.reproduces = random1 < self.food - 1
-
-    # adds food
     def add_food(self, amount):
-        self.food += amount
+        self.score += amount
 
-    # the individual creates an offspring with the same strategy which is returned
-    def reproduce(self):
-        return Individual(strategy=self.strategy, sim=self.simulation)
+    def survives(self):
+        return self.score > self.rng.random()
 
-    # the individual dies
-    def die(self):
-        self.isAlive = False
+    def reproduces(self):
+        """Independent of the survival roll -- Primer draws a second random().
 
-    # increases age by one
-    def increment_age(self):
-        self.age += 1
+        Using one roll for both (as the old code did) correlates the two
+        outcomes and quietly distorts the equilibrium.
+        """
+        return self.score > 1 + self.rng.random()
 
-    # String representation of an individual
+    def make_offspring(self):
+        chance = self.fight_chance
+        if self.rng.random() < self.config.mutation_chance:
+            if self.config.trait_mode == "binary":
+                chance = 1 - chance  # flip dove <-> hawk
+            else:
+                delta = self.config.mutation_variation * self.rng.choice((-1, 1))
+                chance = min(1.0, max(0.0, chance + delta))
+        return Individual(chance, self.config, self.rng)
+
     def __str__(self):
-        return f"{self.strategy.capitalize()} — Age: {self.age}, Food: {self.food}"
+        return f"{self.strategy} — Age: {self.age}, Score: {self.score:g}"
 
-    # For printing lists
-    def __repr__(self):
-        return self.__str__()
+    __repr__ = __str__

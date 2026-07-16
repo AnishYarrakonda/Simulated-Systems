@@ -1,192 +1,206 @@
-import numpy as np
+import math
 import random
 
+from primer_common import palette
+
+
+def wrap_pi(angle):
+    """Fold an angle into (-pi, pi]."""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
 class Creature:
-    distribution_rate = 0.5     # how varied traits are in offspring compared to the parent
-    vision_accuracy = 0.1       # how often the creature correctly spots a tile with food when choosing a location
+    _next_id = 1
 
-    # creates a new creature object with the given traits
-    def __init__(self, size, speed, vision, x=None, y=None):
-        self.size = size                        # Size affects contest outcomes and energy usage (bigger = wins more fights but uses more energy)
-        self.speed = speed                      # Speed = how many tiles you can move before needing a rest
-        self.vision = vision                    # Vision = ability to detect food around your current location
-        self.contest_rank = size**3*speed       # rank used in contests
-        self.food = 0                           # Food collected today, 0-1 is chance of survival, 1 - X is number of offspring fractions turn into chance
-        self.is_alive = True                     # True if the creature is alive this day (dies if not enough food)
-        self.survives = False                   # Whether the creature survives on the given day
-        self.offspring = 0                      # How many offspring the creature has
-        self.traits = np.array([size, speed, vision])     # a list containing the traits for easy array operations
-        self.x = x                              # x location
-        self.y = y                              # y location
-        self.visited_tiles = []                 # tracks tiles already seen to prevent going in circles
-        self.ticks_without_rest = 0             # tracks how long its gone without resting
-        self.resting = False                    # whether it is currently resting
-        self.daily_energy_spent = 0                  # how much energy spent in the entire day
+    def __init__(self, config, size=1.0, speed=1.0, sense=1.0, rng=None):
+        self.config = config
+        self.rng = rng or random
+        self.size = size
+        self.speed = speed
+        self.sense = sense
 
-    # resets food for each new day
-    def reset(self):   
-        self.food = 0
-        self.survives = False
-        self.offspring = 0
-        self.x = None
-        self.y = None
-        self.visited_tiles.clear()
-        self.ticks_without_rest = 0
-        self.resting = False
-        self.daily_energy_spent = 0
+        self.x = 0.0
+        self.y = 0.0
+        self.heading = 0.0
+        self.heading_target = 0.0
+        self.d_heading = 0.0
 
-    # creature gets to eat food
-    def eat(self):
-        self.food += 1
+        self.energy = config.starting_energy
+        self.eaten = []  # food objects consumed today; caps at 2
+        self.state = "foraging"
+        self.alive = True
+        self.home = False  # made it back to an edge having eaten
+        self.dead_today = False
 
-    # creature chooses a location to move to based on whether it thinks the new tile has food or not
-    # can miss tiles with food
-    # can check up to 4 tiles max
-    def choose_location(self, environment):
-        surrounding_tiles = []
-        moves = (-1, 0, 1)
-        max_index = environment.edge_length - 1
-        for hrz in moves:
-            for vrt in moves:
-                tile_x = self.x + hrz
-                tile_y = self.y + vrt
-                if (                                                    # adds to the list ONLY if:
-                    not (tile_x == self.x and tile_y == self.y) and     # NOT the same tile
-                    0 <= tile_x <= max_index and                        # x coord is within bounds
-                    0 <= tile_y <= max_index                        # y coord is within bounds
-                ):
-                    surrounding_tiles.append(environment.gurt[tile_y][tile_x])
-        
-        # a separate list for unvisited tiles
-        # cannot be the same as surrounding tiles to prevent edge cases like
-        # if the creature is on the corner and has visited all surrounding tiles alr
-        best_tiles = []
-        visited_set = set(self.visited_tiles)
-        for tile in surrounding_tiles:
-            if tile not in visited_set:  # tile hasn't alr been visited
-                best_tiles.append(tile)
+        self.id = Creature._next_id
+        Creature._next_id += 1
 
-        # number_of_tiles the creature gets to evaluate depending on its vision trait
-        total_seen_tiles = self.vision//2
-        total_seen_tiles += 1 if (random.random() * 2 < self.vision % 2) else 0
+    @classmethod
+    def reset_ids(cls):
+        cls._next_id = 1
 
-        # randomly select the tiles that the creature will check from all possible options
-        tiles_being_checked = []
-        if total_seen_tiles > len(best_tiles):
-            tiles_being_checked = best_tiles
+    # -- derived -----------------------------------------------------------
+    @property
+    def energy_cost(self):
+        """Primer's cost equation: size^3 * speed^2 + sense, charged per step.
+
+        The cubic on size and the square on speed are what make big and fast
+        expensive enough to trade off against their benefits.
+        """
+        cfg = self.config
+        cost = (self.size * cfg.size_adjust_factor) ** 3 * (
+            self.speed * cfg.speed_adjust_factor
+        ) ** 2
+        cost += self.sense
+        return cost / cfg.sim_resolution
+
+    @property
+    def sense_radius(self):
+        return self.config.eat_distance + self.config.base_sense_distance * self.sense
+
+    @property
+    def name(self):
+        return f"blob#{self.id}"
+
+    @property
+    def color(self):
+        return palette.CREATURE
+
+    def steps_left(self):
+        cost = self.energy_cost
+        return math.floor(self.energy / cost) if cost > 0 else 0
+
+    def distance_out(self):
+        """Distance to the nearest wall -- how far it is from safety."""
+        e = self.config.world_extent
+        return min(e - abs(self.x), e - abs(self.y))
+
+    # -- day setup ---------------------------------------------------------
+    def place_on_wall(self, rng):
+        e = self.config.world_extent
+        wall = rng.randrange(4)
+        if wall == 0:  # top, heading down
+            self.x, self.y, self.heading = rng.uniform(-e, e), e, -math.pi / 2
+        elif wall == 1:  # right, heading left
+            self.x, self.y, self.heading = e, rng.uniform(-e, e), math.pi
+        elif wall == 2:  # bottom, heading up
+            self.x, self.y, self.heading = rng.uniform(-e, e), -e, math.pi / 2
+        else:  # left, heading right
+            self.x, self.y, self.heading = -e, rng.uniform(-e, e), 0.0
+        self.heading_target = self.heading
+
+    def start_day(self, reverse_heading=False):
+        """Survivors resume from where they ended, turned back around."""
+        self.energy = self.config.starting_energy
+        self.eaten = []
+        self.state = "foraging"
+        self.home = False
+        self.dead_today = False
+        self.d_heading = 0.0
+        if reverse_heading:
+            self.heading = wrap_pi(self.heading + math.pi)
+            self.heading_target = self.heading
+
+    # -- movement ----------------------------------------------------------
+    def choose_state(self, predator_near):
+        if predator_near:
+            self.state = "fleeing"
+            return
+
+        n = len(self.eaten)
+        if n >= 2:
+            self.state = "homebound"
+        elif n == 1:
+            # Head home once the trip home is starting to look expensive. The
+            # state latches: once homebound, it never goes back to foraging.
+            if self.state == "homebound" or (
+                self.steps_left() * self.speed
+                < self.distance_out() * self.config.homebound_ratio
+            ):
+                self.state = "homebound"
+            else:
+                self.state = "foraging"
         else:
-            tiles_being_checked = random.sample(best_tiles, k=int(total_seen_tiles))
+            self.state = "foraging" if self.state != "homebound" else "homebound"
 
-        for tile in tiles_being_checked:
-            if tile.food and random.random() < Creature.vision_accuracy:
-                return tile
-        
-        if not best_tiles:
-            return random.choice(surrounding_tiles)
+    def wander(self):
+        cfg = self.config
+        e = cfg.world_extent
+        if max(abs(self.x), abs(self.y)) + cfg.edge_margin > e:
+            # Near the edge, bias back toward the middle instead of wandering out.
+            self.heading_target = math.atan2(-self.y, -self.x)
         else:
-            return random.choice(best_tiles)
-        
-    
-    # determines if a creature should rest on the given tick or not based on how fatigued it is and its speed
-    def should_rest(self):
-        if self.resting:
-            return False
-        elif self.ticks_without_rest < int(self.speed):
-            return False
-        else:
-            return random.random() < self.speed%1
+            self.heading_target = wrap_pi(
+                self.heading_target
+                + self.rng.uniform(-cfg.heading_target_variation, cfg.heading_target_variation)
+            )
 
+    def aim_home(self):
+        """Home is the nearest wall, not where the day started."""
+        e = self.config.world_extent
+        gaps = ((e - self.x, 0.0), (e + self.x, math.pi),
+                (e - self.y, math.pi / 2), (e + self.y, -math.pi / 2))
+        self.heading_target = min(gaps, key=lambda g: g[0])[1]
 
-    # determines how an individual survives and reproduces
-    # the net_energy units they have from 0-1 is the chance of them surviving
-    # the rest of the energy is the number of offspring
-    def survive_and_set_offspring(self):
-        net_gain = self.food-self.daily_energy_spent
-        if net_gain <= 1:
-            self.survives = random.random() < net_gain
-        else:
-            self.survives = True
-            net_gain -= 1  # reserve 1 food unit for survival
+    def turn(self):
+        cfg = self.config
+        diff = wrap_pi(self.heading_target - self.heading)
+        if diff > 0:
+            self.d_heading = min(self.d_heading + cfg.turn_acceleration_eff,
+                                 cfg.max_turn_speed_eff)
+        elif diff < 0:
+            self.d_heading = max(self.d_heading - cfg.turn_acceleration_eff,
+                                 -cfg.max_turn_speed_eff)
+        if abs(diff) < abs(self.d_heading):  # don't overshoot
+            self.d_heading = diff
+        self.heading = wrap_pi(self.heading + self.d_heading)
 
-            # Reproduction: for each remaining energy unit one offspring is reproduced
-            while net_gain >= 1:
-                self.offspring += 1
-                net_gain -= 1
+    def effective_speed(self):
+        """Turning costs speed, so sharp course changes slow a creature down."""
+        cfg = self.config
+        ratio = abs(self.d_heading) / cfg.max_turn_speed_eff if cfg.max_turn_speed_eff else 0
+        return self.speed * (1 - ratio**2 / 2)
 
-            # Handle fractional leftover food
-            if net_gain > 0:
-                if random.random() < net_gain:
-                    self.offspring += 1
+    def advance(self):
+        e = self.config.world_extent
+        speed = self.effective_speed()
 
-    # returns a list of creature objects (its offspring)
-    def reproduce_offspring(self):
-        if self.offspring == 0:
-            return []
+        nx = self.x + math.cos(self.heading) * speed
+        ny = self.y + math.sin(self.heading) * speed
 
-        # Generate noise matrix: shape (offspring_count, 4)
-        noise = np.random.randn(self.offspring, 3) * Creature.distribution_rate
+        outside = max(abs(nx), abs(ny)) >= e
+        if outside:
+            nx = min(e, max(-e, nx))
+            ny = min(e, max(-e, ny))
+            # Reaching the edge only counts as home if it actually ate something.
+            if not self.home and len(self.eaten) > 0:
+                self.home = True
+        self.x, self.y = nx, ny
 
-        # Add noise to parent's traits
-        offspring_traits = self.traits + noise
+    def can_eat(self):
+        return len(self.eaten) < 2
 
-        # Clip traits to biologically valid ranges
-        trait_mins = np.array([1.0, 1.0, 1.0])   # min values for [size, speed, vision]
-        trait_maxs = np.array([8.0, 8.0, 8.0])  # max values
-        offspring_traits = np.clip(offspring_traits, trait_mins, trait_maxs)
+    # -- reproduction ------------------------------------------------------
+    def _mutate(self, value, enabled):
+        cfg = self.config
+        if enabled and self.rng.random() < cfg.mutation_chance:
+            value += cfg.mutation_variation * self.rng.choice((-1, 1))
+        return value
 
-        # Create offspring creatures from traits
-        offspring_list = []
-        for traits in offspring_traits:
-            size, speed, vision = traits
-            child = Creature(size=size, speed=speed, vision=vision)
-            offspring_list.append(child)
-
-        return offspring_list
-    
-    # returns how much energy the creature spent on the tick
-    def energy_spent(self):
-        return 0.02 * (self.vision**3 + self.size**2 + self.speed) ** 0.15
-
-    # updates creature at the end of each tick
-    def update_creature(self):
-        # add energy to the total counter
-        self.daily_energy_spent += self.energy_spent()
-        
-        # update fatigue
-        if self.resting:
-            self.resting = False
-            self.ticks_without_rest = 0
-        else:
-            self.ticks_without_rest += 1
-
-    # creature object as a string
-    def __str__(self):
-        return (
-            f"Creature:\n"
-            f"Size: {self.size:.2f},\n"
-            f"Speed: {self.speed:.2f},\n"
-            f"Vision: {self.vision:.2f},\n"
-            f"Food: {self.food:.2f},\n"
-            f"Survives: {self.survives},\n"
-            f"Offspring: {self.offspring}\n"
-            f"X coordinate: {self.x}\n"
-            f"Y coordinate: {self.y}\n"            
+    def make_offspring(self):
+        cfg = self.config
+        child = Creature(
+            cfg,
+            size=self._mutate(self.size, cfg.mutate_size),
+            speed=self._mutate(self.speed, cfg.mutate_speed),
+            sense=self._mutate(self.sense, cfg.mutate_sense),
+            rng=self.rng,
         )
+        child.x, child.y, child.heading = self.x, self.y, self.heading
+        return child
 
-    # same as __str__()
-    def __repr__(self):
-        return self.__str__()
+    def __str__(self):
+        return (f"Creature(size={self.size:.2f}, speed={self.speed:.2f}, "
+                f"sense={self.sense:.2f}, ate={len(self.eaten)})")
 
-# Test
-if __name__ == '__main__':
-    parent = Creature(size=2, speed=3, vision=5)
-    parent.food = 5.2
-
-    # Run survival and reproduction logic
-    parent.survive_and_set_offspring()
-    offspring = parent.reproduce_offspring()
-
-    # Print offspring traits
-    for child in offspring:
-        print(child)
-    print(len(offspring))
+    __repr__ = __str__

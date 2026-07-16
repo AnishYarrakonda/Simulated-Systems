@@ -80,3 +80,6 @@ venv.bak/
 # models/
 # data/
 # datasets/
+
+# Claude Code local overrides
+.claude/settings.local.json

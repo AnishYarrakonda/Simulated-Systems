@@ -1,107 +1,186 @@
-from individual import Individual
+"""Hawk/Dove, after Primer's "Simulating the Evolution of Aggression".
+
+Two windows: a pygame arena (blobs walk to bushes, pair up, resolve) with the
+play-by-play underneath, and a matplotlib window with the live graphs.
+
+    python3 main.py                          # Primer's defaults
+    python3 main.py --doves 10 --hawks 150   # converges to the same 50/50 ESS
+    python3 main.py --trait-mode float --mutation-chance 0.01
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from primer_common import graphs, palette
+from primer_common.arena import PHASES, Arena, Walker, ring_positions
+
+from config import Config
 from simulation import Simulation
 
-import random
-import matplotlib.pyplot as plt
 
-# Requires the number of patches, days, starting doves, and starting hawks to be passed
-def main(patches, days, doves, hawks):
-    # create a new simulation
-    sim = Simulation(patches)
+def build_graphs(config):
+    fig = graphs.new_figure("Hawk / Dove — graphs")
+    gs = fig.add_gridspec(2, 1, hspace=0.35)
+    line = graphs.LineGraph(
+        fig.add_subplot(gs[0]),
+        {"Doves": palette.DOVE, "Hawks": palette.HAWK},
+        title="Doves vs. Hawks",
+        ylabel="Creatures",
+    )
+    if config.trait_mode == "float":
+        # Primer switches to an 11-bin fight_chance histogram in float mode.
+        second = graphs.Histogram(
+            fig.add_subplot(gs[1]),
+            bins=range(11),
+            title="Aggression distribution",
+            xlabel="fight_chance (tenths)",
+            colors=[
+                palette.to_mpl(palette.mix_colors(palette.DOVE, palette.HAWK, i / 10))
+                for i in range(11)
+            ],
+            width=0.7,
+        )
+    else:
+        second = graphs.LineGraph(
+            fig.add_subplot(gs[1]),
+            {"Total": palette.TEXT},
+            title="Total population",
+            ylabel="Creatures",
+        )
+    return fig, line, second
 
-    # number of days it runs for
-    days_to_simulate = days
 
-    # Initialize the simulation with x doves and y hawks
-    initial_doves = doves
-    initial_hawks = hawks
-    total = initial_doves + initial_hawks
+def update_graphs(sim, line, second, config):
+    days = sorted(sim.individuals_on_day)
+    line.update(
+        days,
+        {
+            "Doves": [sim.doves_on_day[d] for d in days],
+            "Hawks": [sim.hawks_on_day[d] for d in days],
+        },
+    )
+    if config.trait_mode == "float":
+        second.update(sim.fight_chance_histogram())
+    else:
+        second.update(days, {"Total": [sim.individuals_on_day[d] for d in days]})
+    graphs.draw()
 
-    # Cap total population to patches * 2
-    max_total = patches * 2
 
-    # for invalid input
-    if total > max_total:
-        scale_factor = max_total / total
-        initial_doves = int(initial_doves * scale_factor)
-        initial_hawks = int(initial_hawks * scale_factor)
+def build_walkers(sim, contests, bushes, homes):
+    """Send each contesting blob out to its bush; the two share it side by side."""
+    walkers = {}
+    for patch in contests:
+        bush = bushes[patch.index % len(bushes)]
+        for slot, ind in enumerate((patch.individual1, patch.individual2)):
+            if ind is None:
+                continue
+            offset = 9 if slot == 0 else -9
+            walkers[ind.id] = Walker(
+                homes[len(walkers) % len(homes)], (bush[0] + offset, bush[1])
+            )
+    return walkers
 
-        # Ensure the total doesn't go under due to rounding
-        while initial_doves + initial_hawks < max_total:
-            random1 = random.random()
-            if random1 < 0.5:
-                initial_doves += 1
-            else:
-                initial_hawks += 1
 
-    # quickly loop to add all the individuals to the sim
-    for _ in range(initial_doves):
-        sim.add_individual_to_sim(Individual("Dove", sim))
+def draw(arena, sim, bushes, walkers, phase, t):
+    for bush in bushes:
+        arena.draw_food(bush, radius=4)
+    for ind in sim.individuals:
+        walker = walkers.get(ind.id)
+        if walker is None:
+            continue
+        squash = 1.0 if walker.eating(phase, t) else 0.0
+        arena.draw_blob(walker.position(phase, t), color=ind.color, squash=squash)
 
-    for _ in range(initial_hawks):
-        sim.add_individual_to_sim(Individual("Hawk", sim))
 
-    # Print out a statement so the user knows its running
-    print("Simulation running...\nPlease be patient for large numbers\nMay take longer than expected.")
+def run(config):
+    sim = Simulation(config)
 
-    # Create the figures to be plotted on
-    fig, axs = plt.subplots(2)
+    if not config.render:
+        for _ in range(config.days):
+            sim.simulate_day()
+        return sim
 
-    axs[0].set_title("Doves vs. Hawks")
-    axs[1].set_title("Total Population")
-    axs[0].set_xlabel("Days")
-    axs[1].set_xlabel("Days")
-    axs[0].set_ylabel("Number of Individuals")
-    axs[1].set_ylabel("Number of Individuals")
-    axs[0].set_ylim(0, patches * 2)
-    axs[1].set_ylim(0, patches * 2)
+    arena = Arena("Hawk / Dove — arena", world_extent=150)
+    build_graphs_result = build_graphs(config)
+    _, line, second = build_graphs_result
 
-    # Initialize lines
-    line_doves, = axs[0].plot([], [], color="teal", label="Doves")
-    line_hawks, = axs[0].plot([], [], color="red", label="Hawks")
-    line_total, = axs[1].plot([], [], color="black", label="Total Population")
+    for _ in range(config.days):
+        if not arena.running:
+            break
 
-    axs[0].legend()
-    axs[1].legend()
+        contests = sim.simulate_day()
+        bushes = ring_positions(config.food_count, radius=95, jitter=18, rng=sim.rng)
+        homes = ring_positions(max(1, len(sim.individuals)), radius=140)
+        walkers = build_walkers(sim, contests, bushes, homes)
 
-    # Simulate the specified number of days
-    for day in range(1, days_to_simulate + 1):
-        sim.simulate_day()
+        update_graphs(sim, line, second, config)
 
-        days_list = list(sim.doves_on_day.keys())
-        doves_list = list(sim.doves_on_day.values())
-        hawks_list = list(sim.hawks_on_day.values())
-        total_list = list(sim.individuals_on_day.values())
+        hud = f"Day {sim.day}  pop {len(sim.individuals)}"
+        for phase, duration in PHASES:
+            elapsed = 0.0
+            while elapsed < duration and arena.running:
+                if not arena.pump():
+                    break
+                arena.begin_frame()
+                draw(arena, sim, bushes, walkers, phase, min(1.0, elapsed / duration))
+                dt = arena.end_frame(sim.log, hud=hud)
+                if not arena.paused:
+                    elapsed += dt * arena.speed
 
-        line_doves.set_data(days_list, doves_list)
-        line_hawks.set_data(days_list, hawks_list)
-        line_total.set_data(days_list, total_list)
+    arena.quit()
+    graphs.show()
+    return sim
 
-        axs[0].set_xlim(1, max(10, day))
-        axs[1].set_xlim(1, max(10, day))
 
-        # pause each iteration for animation
-        plt.pause(0.001)
-
-    # keeps window open after animation
-    plt.show()
-
-    # After simulation, print population history
-    print("\nPopulation history:")
-    for day in range(1, days_to_simulate + 1):
-        doves = sim.doves_on_day.get(day, 0)
-        hawks = sim.hawks_on_day.get(day, 0)
-        total = sim.individuals_on_day.get(day, 0)
-        print(f"Day {day}: Doves = {doves}, Hawks = {hawks}, Total = {total}")
-
-    # Print out the average population for each category
-    print("Average Dove total:")
-    sim.print_population_average("Dove")
-    print("Average Hawk total:")
-    sim.print_population_average("Hawk")
-    print("Average total population:")
-    sim.print_population_average("Total")
+def parse_args():
+    d = Config()
+    p = argparse.ArgumentParser(description="Primer-style hawk/dove simulation")
+    p.add_argument("--days", type=int, default=d.days)
+    p.add_argument("--num-creatures", type=int, default=d.num_creatures)
+    p.add_argument("--food-count", type=int, default=d.food_count)
+    p.add_argument("--food-value", type=float, default=d.food_value)
+    p.add_argument("--fight-cost", type=float, default=d.fight_cost)
+    p.add_argument("--hawk-take-fraction", type=float, default=d.hawk_take_fraction)
+    p.add_argument("--sucker-fraction", type=float, default=d.sucker_fraction)
+    p.add_argument("--share-fraction", type=float, default=d.share_fraction)
+    p.add_argument("--fight-fraction", type=float, default=d.fight_fraction)
+    p.add_argument("--mutation-chance", type=float, default=d.mutation_chance)
+    p.add_argument("--trait-mode", choices=("binary", "float"), default=d.trait_mode)
+    p.add_argument("--doves", type=int, default=None)
+    p.add_argument("--hawks", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--no-render", action="store_true")
+    a = p.parse_args()
+    return Config(
+        days=a.days,
+        num_creatures=a.num_creatures,
+        food_count=a.food_count,
+        food_value=a.food_value,
+        fight_cost=a.fight_cost,
+        hawk_take_fraction=a.hawk_take_fraction,
+        sucker_fraction=a.sucker_fraction,
+        share_fraction=a.share_fraction,
+        fight_fraction=a.fight_fraction,
+        mutation_chance=a.mutation_chance,
+        trait_mode=a.trait_mode,
+        doves=a.doves,
+        hawks=a.hawks,
+        seed=a.seed,
+        render=not a.no_render,
+    )
 
 
 if __name__ == "__main__":
-    main(patches=100, days=1000, doves=10, hawks=10)
+    sim = run(parse_args())
+    days = sorted(sim.individuals_on_day)
+    if days:
+        tail = days[-min(10, len(days)) :]
+        hawk_pct = [
+            100 * sim.hawks_on_day[d] / max(1, sim.individuals_on_day[d]) for d in tail
+        ]
+        print(f"\nFinal population: {sim.individuals_on_day[days[-1]]}")
+        print(f"Hawk share over last {len(tail)} days: {sum(hawk_pct) / len(hawk_pct):.1f}%")
+        print("Primer's mixed ESS is 50%.")
