@@ -15,6 +15,13 @@ from .feed import Feed
 # Primer's per-phase animation durations, in seconds (DEFAULT_ANIM_DURATIONS).
 PHASES = (("dawn", 0.5), ("morning", 0.25), ("day", 4.0), ("evening", 0.25), ("night", 0.5))
 
+# Playback speed range. Purely a rendering concern -- speed multiplies how many
+# sim steps (spatial) or how much phase time (non-spatial) a frame advances; it
+# never touches a rule. Log scale so the slider gives fine control at 1x and
+# still reaches the 100x fast-forward the long runs want.
+SPEED_MIN = 0.125
+SPEED_MAX = 100.0
+
 
 def ease(t):
     """Smoothstep. Primer's movements accelerate and settle rather than snap."""
@@ -43,6 +50,18 @@ class Arena:
         self.arena_rect = pygame.Rect(0, 0, size[0], size[1] - feed_height)
         self.feed_rect = pygame.Rect(0, size[1] - feed_height, size[0], feed_height)
 
+        # The world->screen transform is fixed once the window exists, so cache
+        # the scale and centre instead of recomputing min()/division per blob
+        # per frame (to_screen is called for every food and creature each frame).
+        side = min(self.arena_rect.width, self.arena_rect.height) - 24 * 2
+        self._scale = side / (world_extent * 2)
+        self._cx = self.arena_rect.centerx
+        self._cy = self.arena_rect.centery
+
+        # Halo surfaces depend only on (width, height, colour); allocating one
+        # per blob per frame was the dominant per-frame cost. Cache and reuse.
+        self._halo_cache = {}
+
         self.font = pygame.font.SysFont("menlo,dejavusansmono,monospace", 12)
         self.title_font = pygame.font.SysFont("helvetica,arial,sans-serif", 16)
         self.feed = Feed(self.font)
@@ -51,23 +70,45 @@ class Arena:
         self.paused = False
         self.speed = 1.0
         self._pad = 24
+        self._dragging_speed = False
 
     # -- transform ---------------------------------------------------------
     def to_screen(self, pos):
         """World (-extent..extent) -> screen pixels, preserving aspect."""
-        side = min(self.arena_rect.width, self.arena_rect.height) - self._pad * 2
-        scale = side / (self.world_extent * 2)
-        cx = self.arena_rect.centerx
-        cy = self.arena_rect.centery
-        return (cx + pos[0] * scale, cy - pos[1] * scale)
+        return (self._cx + pos[0] * self._scale, self._cy - pos[1] * self._scale)
 
     def scale_len(self, length):
-        side = min(self.arena_rect.width, self.arena_rect.height) - self._pad * 2
-        return length * side / (self.world_extent * 2)
+        return length * self._scale
+
+    # -- speed slider ------------------------------------------------------
+    def _slider_geom(self):
+        """Track endpoints (x0, x1) and centre y for the speed slider, in the
+        arena's top-right corner clear of the top-left HUD text."""
+        y = self.arena_rect.top + 26
+        x1 = self.arena_rect.right - 20
+        x0 = x1 - 160
+        return x0, x1, y
+
+    def _speed_to_frac(self, speed):
+        return math.log(speed / SPEED_MIN) / math.log(SPEED_MAX / SPEED_MIN)
+
+    def _frac_to_speed(self, frac):
+        frac = min(1.0, max(0.0, frac))
+        return SPEED_MIN * (SPEED_MAX / SPEED_MIN) ** frac
+
+    def _slider_hit(self, pos):
+        """Is a click near the slider track? A generous vertical band so the
+        thin track is easy to grab."""
+        x0, x1, y = self._slider_geom()
+        return x0 - 10 <= pos[0] <= x1 + 10 and y - 12 <= pos[1] <= y + 12
+
+    def _set_speed_from_x(self, x):
+        x0, x1, _ = self._slider_geom()
+        self.speed = self._frac_to_speed((x - x0) / (x1 - x0))
 
     # -- loop --------------------------------------------------------------
     def pump(self):
-        """Handle input. Space pauses, +/- changes speed, q/esc quits."""
+        """Handle input. Space pauses, +/- or the slider changes speed, q/esc quits."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -77,9 +118,17 @@ class Arena:
                 elif event.key == pygame.K_SPACE:
                     self.paused = not self.paused
                 elif event.key in (pygame.K_EQUALS, pygame.K_PLUS):
-                    self.speed = min(64.0, self.speed * 2)
+                    self.speed = min(SPEED_MAX, self.speed * 2)
                 elif event.key == pygame.K_MINUS:
-                    self.speed = max(1 / 8, self.speed / 2)
+                    self.speed = max(SPEED_MIN, self.speed / 2)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self._slider_hit(event.pos):
+                    self._dragging_speed = True
+                    self._set_speed_from_x(event.pos[0])
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._dragging_speed = False
+            elif event.type == pygame.MOUSEMOTION and self._dragging_speed:
+                self._set_speed_from_x(event.pos[0])
         return self.running
 
     def begin_frame(self):
@@ -88,13 +137,30 @@ class Arena:
     def end_frame(self, log, hud=""):
         self.feed.draw(self.surface, self.feed_rect, log)
         if hud:
-            text = f"{hud}   [{self.speed:g}x{' PAUSED' if self.paused else ''}]"
+            text = f"{hud}   [{'PAUSED' if self.paused else 'space=pause'}]"
             self.surface.blit(
                 self.title_font.render(text, True, palette.TEXT),
                 (self.arena_rect.left + 12, self.arena_rect.top + 8),
             )
+        self.draw_speed_slider()
         pygame.display.flip()
         return self.clock.tick(self.fps) / 1000.0
+
+    def draw_speed_slider(self):
+        """A draggable log-scale speed control in the arena's top-right corner."""
+        x0, x1, y = self._slider_geom()
+        frac = self._speed_to_frac(self.speed)
+        hx = int(x0 + (x1 - x0) * frac)
+
+        # Track: dim behind the handle, bright up to it, so fill reads as level.
+        pygame.draw.line(self.surface, palette.GRAY, (x0, y), (x1, y), 2)
+        pygame.draw.line(self.surface, palette.TEXT, (x0, y), (hx, y), 2)
+        pygame.draw.circle(self.surface, palette.TEXT, (hx, y), 6)
+
+        # Value sits left of the track (right of it would run off the window),
+        # right-aligned so the digits don't jitter as the speed changes width.
+        label = self.title_font.render(f"{self.speed:g}x speed", True, palette.TEXT)
+        self.surface.blit(label, (x0 - 10 - label.get_width(), y - label.get_height() // 2))
 
     def quit(self):
         pygame.quit()
@@ -120,9 +186,18 @@ class Arena:
         ry = r * (1 - 0.35 * squash)
 
         # Soft halo, then the body -- reads closer to a metaball than a hard disc.
-        halo = pygame.Surface((int(rx * 4), int(ry * 4)), pygame.SRCALPHA)
-        pygame.draw.ellipse(halo, (*color, 60), halo.get_rect())
-        self.surface.blit(halo, (x - rx * 2, y - ry * 2))
+        # The halo bitmap depends only on its pixel size and colour, so build it
+        # once per (w, h, colour) and reuse; allocating + drawing a fresh
+        # SRCALPHA surface per blob per frame was the top per-frame cost.
+        hw, hh = int(rx * 4), int(ry * 4)
+        if hw > 0 and hh > 0:
+            key = (hw, hh, color)
+            halo = self._halo_cache.get(key)
+            if halo is None:
+                halo = pygame.Surface((hw, hh), pygame.SRCALPHA)
+                pygame.draw.ellipse(halo, (*color, 60), halo.get_rect())
+                self._halo_cache[key] = halo
+            self.surface.blit(halo, (x - rx * 2, y - ry * 2))
 
         rect = pygame.Rect(0, 0, int(rx * 2), int(ry * 2))
         rect.center = (int(x), int(y + ry * 0.35 * squash))

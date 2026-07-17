@@ -114,6 +114,11 @@ class Scatter3D:
         self.labels = labels
         self.rng = rng
         self._reset(title)
+        # One persistent artist whose offsets we rewrite each day. The old path
+        # cleared the whole 3D axis (cla) and re-styled every pane/grid per
+        # frame, which was the heaviest graph update -- this skips all of it.
+        self._scatter = ax.scatter([], [], [],
+                                   c=[palette.to_mpl(palette.CREATURE)], s=14, alpha=0.7)
 
     def _reset(self, title=""):
         ax = self.ax
@@ -132,9 +137,9 @@ class Scatter3D:
         ax.tick_params(colors=FG)
 
     def update(self, xs, ys, zs):
-        self.ax.cla()
-        self._reset()
-        self.ax.scatter(xs, ys, zs, c=[palette.to_mpl(palette.CREATURE)], s=14, alpha=0.7)
+        # Rewrite the point cloud in place; axis styling and limits are fixed,
+        # so there's no need to clear and rebuild the axis every frame.
+        self._scatter._offsets3d = (xs, ys, zs)
 
 
 class TernaryPlot:

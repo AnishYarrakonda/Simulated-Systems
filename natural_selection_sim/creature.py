@@ -35,13 +35,19 @@ class Creature:
         self.id = Creature._next_id
         Creature._next_id += 1
 
+        # size/speed/sense never mutate on a live creature (offspring are new
+        # objects), so these derived values are constant for its whole life.
+        # Cached once here -- they sit in the O(N^2) per-step scan hot path and
+        # were the top property cost in the profile.
+        self.energy_cost = self._compute_energy_cost()
+        self.sense_radius = config.eat_distance + config.base_sense_distance * sense
+
     @classmethod
     def reset_ids(cls):
         cls._next_id = 1
 
     # -- derived -----------------------------------------------------------
-    @property
-    def energy_cost(self):
+    def _compute_energy_cost(self):
         """Primer's cost equation: size^3 * speed^2 + sense, charged per step.
 
         The cubic on size and the square on speed are what make big and fast
@@ -53,10 +59,6 @@ class Creature:
         ) ** 2
         cost += self.sense
         return cost / cfg.sim_resolution
-
-    @property
-    def sense_radius(self):
-        return self.config.eat_distance + self.config.base_sense_distance * self.sense
 
     @property
     def name(self):

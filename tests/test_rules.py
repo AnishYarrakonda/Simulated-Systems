@@ -118,6 +118,7 @@ def test_predation_threshold_is_exactly_1_2x(prey_size, predator_size, expected)
     predator.x = predator.y = 0.0
     prey.x, prey.y = 1.0, 0.0
     env.creatures = [predator, prey]
+    env._build_creature_grid()  # scans read the spatial index a real day builds
     found, _ = env._nearest_prey(predator)
     assert (found is prey) is expected
 
@@ -131,9 +132,10 @@ def test_prey_is_immune_once_home():
     predator.x = predator.y = prey.y = 0.0
     prey.x = 1.0
     env.creatures = [predator, prey]
+    env._build_creature_grid()
 
     assert env._nearest_prey(predator)[0] is prey
-    prey.home = True
+    prey.home = True  # filtered by the flag in the scan, not by grid membership
     assert env._nearest_prey(predator)[0] is None
 
 
@@ -148,6 +150,8 @@ def test_eating_caps_at_two_and_transfers_prey_stomach():
     prey.eaten = [ns_env.Food(50, 50)]  # prey already ate one
     env.creatures = [predator, prey]
     env.food = []
+    env._build_creature_grid()
+    env._build_food_grid()
 
     env._try_eat(predator)
     assert not prey.alive
